@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <sys/types.h> 
 #include <unistd.h> 
 #include <strings.h>
@@ -17,7 +18,16 @@
 #define MAX_PATH_LENGTH 150
 #define WWW_DIR "../www"
 #define SERVER_NAME "A2_BeniAndKush"
-#define DATE_FORMAT "%a, %d %b %Y %X GMT"
+#define DEFAULT_PORT 80
+
+void printhelp(){
+    printf("-h Print help text.\n");
+    printf("-p port Listen to port number port\n");
+    printf("-d Run as a daemon instead of as a normal program. [NOT SUPPORTED]\n");
+    printf("-l logfile Log to logfile. If this option is not specified, logging will be output to syslog, which is the default. [NOT SUPPORTED]\n");
+    printf("-s [fork | thread | prefork | mux] Select request handling method. [NOT SUPPORTED]\n");
+}
+
 
 //Removes paramter from url
 void removeParam(char* url, char* str){
@@ -31,14 +41,21 @@ void removeParam(char* url, char* str){
 	}
 }
 
-void setDefaultHeader(char *str, int status){ 
+void setDefaultHeader(char *str, int status){
+    time_t t = time(0);
+    struct tm *gmt = gmtime(&t);
+    char timeString[100];
+    strftime(timeString, 100, "%a, %d %b %Y %X GMT", gmt);
+    
     snprintf(str, 9999,
         "%s %i\r\n"
         "Content-Type: text/html\r\n"
-        "Server: %s\r\n",
+        "Server: %s\r\n"
+        "Date: %s\r\n",
         HTTP1,
         status,
-        SERVER_NAME);  
+        SERVER_NAME,
+        timeString);  
 }
 
 //Adds "index.html" if neccessary
@@ -96,8 +113,6 @@ void statusResponse(int socket, int code){
     strcat(message, "\r\n");
     strcat(message, body);
     
-    
-	printf("ERROR: %s", message);
 	write(socket, message, strlen(message));
 }
 
@@ -105,7 +120,6 @@ void handleRequest(int socket){
 	char  buffer[9999];
 	if(read(socket, buffer, 9999)<0){
         statusResponse(socket, 500);
-        printf("Error reading");
         return;
     }
 	char *method = strtok(buffer,  " \t\r\n");
@@ -113,17 +127,12 @@ void handleRequest(int socket){
 	char *protocol = strtok(NULL, " \t\r\n"); 
     
 		
-	printf("\nNew request: \n");
-	printf("  method: -%s- \n  url: -%s-  \n  protocol:  -%s-\n ", method, url, protocol);
-    
     //Check if path is too long
     if(strlen(url)>MAX_PATH_LENGTH){
-        printf("\nxxxxxx PATH TOO LONG xxxxxx\n");
         statusResponse(socket, 400);
         return;
     //Check if path could read files outside of the www-directory
     }else if(strstr(url,"..") != NULL){
-        printf("\nxxxxxx Illegal dots in path xxxxxx\n");
         statusResponse(socket, 403);
         return;
     }
@@ -134,8 +143,19 @@ void handleRequest(int socket){
 		isGet=1;
 	}else if(strcmp(method,HEAD) == 0){
 		isGet=0;
+    }else if(
+        strcmp(method,"POST") == 0 ||
+        strcmp(method,"PUT") == 0 ||
+        strcmp(method,"DELETE") == 0 ||
+        strcmp(method,"CONNECT") == 0 ||
+        strcmp(method,"OPTIONS") == 0 ||
+        strcmp(method,"TRACE") == 0 ||
+        strcmp(method,"PATCH") == 0
+        ){
+        statusResponse(socket, 501);
+        return;
 	}else{
-		statusResponse(socket, 501);
+		statusResponse(socket, 400);
 		return;
 	}
 
@@ -149,12 +169,10 @@ void handleRequest(int socket){
         return;
     }
     
-
 	char path[999];
 	removeParam(url, path);
 	addIndexHtml(path);
     addSlash(path);
-    
 
 	char real_path [MAX_PATH_LENGTH+1];
 	
@@ -162,8 +180,6 @@ void handleRequest(int socket){
     char wwwPath[MAX_PATH_LENGTH + strlen(WWW_DIR)];
     strcpy(wwwPath, WWW_DIR);
     strcat(wwwPath, path);
-    
-    printf("wwwPath: %s\n", wwwPath); 
     
 	if(realpath(wwwPath, real_path) == NULL){
         int statusCode;
@@ -174,12 +190,10 @@ void handleRequest(int socket){
             default: statusCode = 400;break; 
         }
         statusResponse(socket, statusCode);
-        printf("Error with realpath!");
 		return;
 	}
-	printf("Realpath: %s",real_path);
     
-    //Use stat to see if file can be accessed AND to get status of the file (To use change-date in header)
+    //Use stat to see if file can be accessed AND to get status of the file (which will be used in header)
     struct stat file_stat;
     if(stat(real_path, &file_stat) != 0){
         int statusCode;
@@ -187,10 +201,9 @@ void handleRequest(int socket){
             case EACCES: statusCode = 403;break;
             case ENOENT: statusCode = 404;break;
             case ENOMEM: statusCode = 500;break;
-            default: statusCode = 400;break;
+            default: statusCode = 500;break;
         }
         statusResponse(socket, statusCode);
-        printf("Error with stat");
         return;
     }
     
@@ -203,25 +216,28 @@ void handleRequest(int socket){
         char defaultHeader[500];
         char extendedHeader[500];
         setDefaultHeader(defaultHeader, 200);
+
+        struct tm *gmt = gmtime(&file_stat.st_mtim.tv_sec);
+        char timeString[100];
+        strftime(timeString, 100, "%a, %d %b %Y %X GMT", gmt);
         
         snprintf(extendedHeader, 500,
-            "Content-Length: %li\r\n",
-            file_stat.st_size);
+            "Content-Length: %li\r\n"
+            "Last-Modified: %s\r\n",
+            file_stat.st_size,
+            timeString);
         
         strcpy(header, defaultHeader);
         strcat(header, extendedHeader);
         strcat(header, "\r\n");
 
-            
         write(socket, header, strlen(header));
-        printf("\n--------------HEADER---------------\n%s\n----------------------------\n", header);
     }
     
     //Send the file as body, if the method is GET 
     if(isGet){
         FILE *file;
         if((file = fopen(real_path, "r")) == NULL){
-            printf("Error opening file");
             statusResponse(socket, 500);
             return;
         }
@@ -232,15 +248,46 @@ void handleRequest(int socket){
         while((bytes = read(stream, buffer, 1024)) > 0){
             write(socket, buffer, bytes);
         }
-        printf("++++++++++++BODY SENT++++++++++++++++++");
         fclose(file);
     }
 }
 
-int main(){
-	//AF_INET = IPV4; SOCK_STREAM = TCP
+int main(int argc, char* argv[])
+{
+    int port = DEFAULT_PORT;
+    
+    int i=1;
+    while(i < argc){
+        //HELP
+        if (strcmp(argv[i],"-h")==0){
+            printhelp();
+            exit(0);
+        //PORT
+        }else if (strcmp(argv[i],"-p")==0){
+            i++;
+            if (i < argc){
+                char* c = argv[i];
+                //This loop checks if there is a non-numeric character in the port-flag
+                while (*c) {
+                    if (isdigit(*c++)==0){
+                        printhelp();
+                        exit(3);
+                    };
+                }
+                port = atoi (argv[i]);
+            }else{
+                printhelp();
+                exit(3);
+            }
+        }else{
+            printhelp();
+            exit(3);
+        }
+        i++;
+    }
+
+    //AF_INET = IPV4; SOCK_STREAM = TCP
 	int socket_id = socket(AF_INET, SOCK_STREAM, 0);
-	int port = 80;
 
 	if(socket_id < 0){
 		printf("Could not open socket");
@@ -251,8 +298,17 @@ int main(){
 	server_address.sin_family = AF_INET;
 	server_address.sin_port = htons(port);
 	server_address.sin_addr.s_addr = INADDR_ANY; //Bind to all interfaces, not just localhost
-	bind(socket_id, (struct sockaddr *) & server_address, sizeof(server_address));
+	if(bind(socket_id, (struct sockaddr *) & server_address, sizeof(server_address)) != 0){
+        switch(errno){
+            case EACCES: printf("No permission. Try to run as root\n");break;
+            case EADDRINUSE: printf("Port or address already in use\n");break;
+            default: printf("Bind failed");
+        }
+        exit(1);
+    }
 	listen(socket_id, 5);
+    printf("Started server at port %i\n", port);
+       
 
 	while(1){
 		struct sockaddr_in client_address;
@@ -270,6 +326,6 @@ int main(){
 		}
 
 	}
-
+    
+    exit(0);
 }
-
