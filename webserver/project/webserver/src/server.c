@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <errno.h>
+#include <signal.h>
 
 #define GET "GET"
 #define HEAD "HEAD"
@@ -322,6 +323,7 @@ int main(int argc, char* argv[])
 			handleRequest(newsocket_id);
 			exit(0);
 		}else{
+			signal(SIGCHLD,SIG_IGN);
 			close(newsocket_id);
 		}
 
